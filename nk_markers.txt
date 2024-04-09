@@ -1,0 +1,48 @@
+Marker	Function
+CD19	B
+MS4A1	B
+CD79A	B
+CD22	B
+IL10	Anti-inflammatory
+IL12B	Anti-inflammatory
+TGFB1	Anti-inflammatory
+CD226	Cell Adhesion
+SEMA4D	Cell-Cell Signaling
+CXCL10	Chemokine
+CXCR6	Chemokine Receptor
+FCGR3B	Fc Receptor
+ITGAM	Integrin
+ITGAL	Integrin
+B3GAT1	Maturation
+MAMU-DRB1	MHC-II
+NCR1	NK
+NCR2	NK
+RNF19B	NK
+KLRK1	NK
+CD160	NK
+KLRD1	NK
+NCR3	NK
+KLRC1	NK
+NKG7	NK
+GNLY	NK
+PRF1	NK
+GZMB	NK
+IL6	Pro-inflammatory
+IFNG	Pro-inflammatory
+TNF	Pro-inflammatory
+IL18	Pro-inflammatory
+PTPN6	Signaling
+FCER1G	Signaling
+CD247	Signaling
+GRB2	Signaling
+STAT1	Signaling
+ZAP70	Signaling
+NOTCH1	Signaling
+SYK	Signaling
+IKZF2	Transcription Factor
+TBX21	Transcription Factor
+EOMES	Transcription Factor
+PAX5	Transcription Factor
+BCL6	Transcription Factor
+NFIL3	Transcription Regulation
+ID2	Transcription Regulation

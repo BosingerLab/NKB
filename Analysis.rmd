@@ -1,0 +1,382 @@
+---
+title: "NKB analysis"
+author: "Amit Upadhyay"
+date: "11/10/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("Seurat")
+library("dplyr")
+library("reshape2")
+library("ggplot2")
+```
+
+## Create object
+
+```{r create_obj}
+
+# Gene expression matrix
+molecules <- read.table("NumReadsMapped_all.txt")
+dim(molecules)
+
+# Create metadata table
+anno <- data.frame(Sample = colnames(molecules), Sample1 = colnames(molecules))
+
+anno$Sample1 <- gsub("Multi.*21_","Plate_0_",anno$Sample1)
+anno$Sample1 <- gsub("_R1.STAR","",anno$Sample1)
+row.names(anno) <- anno$Sample  
+
+# annotate cell type for Plate 0
+anno$Sample1 <- gsub("Plate_0_","Plate_0_NKB_",anno$Sample1)
+anno$Sample1 <- gsub("Plate_0_NKB_A","Plate_0_NK_A",anno$Sample1)
+anno$Sample1 <- gsub("Plate_0_NKB_B","Plate_0_NK_B",anno$Sample1)
+anno$Sample1 <- gsub("Plate_0_NKB_C","Plate_0_B_C",anno$Sample1)
+anno$Sample1 <- gsub("Plate_0_NKB_D","Plate_0_B_D",anno$Sample1)
+
+anno <- anno %>% separate(col=Sample1, into = c("Tmp","Plate","Type","Well"), sep="_", remove = F)
+
+# Add BALDR metadata
+baldr_h <- read.table("BALDR_H_meta.txt", header = T, sep = "\t")
+baldr_h$Heavy_chain <- "Yes"
+
+baldr_l <- read.table("BALDR_L_meta.txt", header = T, sep = "\t")
+baldr_l$Light_chain <- "Yes"
+
+# Add mutation metadata
+mutations <- read.table("Mutations_KimDB", header = T, sep = "\t")
+
+# Merge all annotation together
+anno_1 <- merge(anno,baldr_h, by = "Sample1", all.x=T)
+anno_2 <- merge(anno_1,baldr_l, by = "Sample1", all.x=T)
+anno_3 <- merge(anno_2,mutations, by = "Sample1", all.x=T)
+row.names(anno_3) <- anno_3$Sample
+write.table(anno_3,"Samplesheet.txt",sep="\t",quote = F)
+
+# Create seurat object and add metadata
+all_rna <- CreateSeuratObject(counts = as.matrix(molecules))
+dim(all_rna)
+all_rna <- AddMetaData(all_rna,anno_3[colnames(all_rna),])
+
+# Add metadata for H/L chain recovery
+all_rna$IgChain <- "No"
+all_rna$IgChain[all_rna$Heavy_chain == "Yes" | all_rna$Light_chain == "Yes"] <- "Yes"
+
+# Add metadata for Paired chains
+all_rna$Heavy_chain[is.na(all_rna$Heavy_chain)]  <- "No"
+all_rna$Light_chain[is.na(all_rna$Light_chain)]  <- "No"
+all_rna$Paired <- "No"
+all_rna$Paired[all_rna$Heavy_chain == "Yes" & all_rna$Light_chain == "Yes"] <- "Yes"
+
+all_rna$Plate <- paste0("Plate",all_rna$Plate)
+
+all_rna$Type_Paired <- paste0(all_rna$Type,"_",all_rna$Paired)
+table(all_rna$Type_Paired, all_rna$Plate)
+
+all_rna$AnimalID  <- "NA"
+all_rna@meta.data[all_rna$Plate == "Plate0",]$AnimalID <- "94-09"
+all_rna@meta.data[all_rna$Plate == "Plate1",]$AnimalID <- "237-09"
+all_rna@meta.data[all_rna$Plate == "Plate2",]$AnimalID <- "237-09"
+all_rna@meta.data[all_rna$Plate == "Plate3",]$AnimalID <- "231-09" # Dropped
+all_rna@meta.data[all_rna$Plate == "Plate4",]$AnimalID <- "231-09"
+all_rna@meta.data[all_rna$Plate == "Plate5",]$AnimalID <- "94-09"  # Dropped
+
+dim(all_rna)
+
+Idents(all_rna) <- "Plate"
+VlnPlot(all_rna, features = c("nFeature_RNA", "nCount_RNA"))
+
+# Remove plates 3 & 5
+
+all_rna <- subset(all_rna, cells = row.names(all_rna@meta.data[all_rna$Plate != "Plate3" & all_rna$Plate != "Plate5",]))
+dim(all_rna)
+
+saveRDS(all_rna,"all_rna_beforeQC_rem_3_5.rds")
+
+```
+
+## QC
+
+```{r QC}
+
+Idents(all_rna) <- "Plate"
+VlnPlot(all_rna, features = c("nFeature_RNA", "nCount_RNA"))
+
+Idents(all_rna) <- "Type"
+FeatureScatter(all_rna, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + 
+  geom_vline(xintercept = 1.5e+06, color ="red") +
+  geom_hline(yintercept = 7500, color ="red")
+
+# Remove bad cells
+all_rna <- subset(all_rna, subset = nFeature_RNA > 500 & nFeature_RNA < 7500 & nCount_RNA < 1.5e+6)
+
+dim(all_rna)
+
+saveRDS(all_rna,"all_rna_sub_filter.rds")
+
+```
+
+## Cluster
+
+```{r cluster}
+
+all_rna <- readRDS("all_rna_sub_filter.rds")
+
+DefaultAssay(all_rna) <- "RNA"
+
+all_rna <- NormalizeData(all_rna, scale.factor = 1e+6)
+all_rna <- FindVariableFeatures(all_rna, selection.method = "vst")
+all_rna <- ScaleData(all_rna, vars.to.regress = "Plate", features = rownames(all_rna))
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+all_rna <- CellCycleScoring(all_rna, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+all_rna <- RunPCA(all_rna)
+all_rna <- RunUMAP(all_rna, dims = 1:45)
+all_rna <- FindNeighbors(all_rna, dims = 1:45)
+all_rna <- FindClusters(all_rna, resolution = 0.3)
+
+
+all_rna$Type_Cluster <- paste0(all_rna$Type,"_",all_rna$seurat_clusters)
+all_rna$Type_Cluster <- factor(all_rna$Type_Cluster, levels = sort(unique(all_rna$Type_Cluster)))
+
+
+all_rna$Type_Cluster2 <- all_rna$Type_Cluster   
+unique(all_rna$Type_Cluster2)
+all_rna$Type_Cluster2 <- gsub("^B_\\d+","B",all_rna$Type_Cluster2)
+all_rna$Type_Cluster2 <- gsub("NK_\\d+","NK",all_rna$Type_Cluster2)
+
+Idents(all_rna) <- "Type_Cluster2"
+table(all_rna$Type_Cluster)
+table(all_rna$Type_Cluster2)
+
+saveRDS(all_rna,"all_rna_sub_filter_cluster.rds")
+
+```
+
+## Manual annotations
+
+```{r manual_ann}
+
+DefaultAssay(all_rna) <- "RNA"
+
+RidgePlot(all_rna,c("CD19","MS4A1","KLRC1")) & geom_vline(xintercept = 3)
+
+all_rna$CD19exp = "CD19neg"
+cells_expr <- WhichCells(object = all_rna, expression = (CD19 > 2),slot="data")
+all_rna@meta.data[cells_expr,]$CD19exp <- "CD19pos"
+
+all_rna$CD20exp = "CD20neg"
+cells_expr <- WhichCells(object = all_rna, expression = (MS4A1 > 2),slot="data")
+all_rna@meta.data[cells_expr,]$CD20exp <- "CD20pos"
+
+all_rna$NKG2Aexp = "NKG2Aneg"
+cells_expr <- WhichCells(object = all_rna, expression = (KLRC1 > 2),slot="data")
+all_rna@meta.data[cells_expr,]$NKG2Aexp <- "NKG2Apos"
+
+all_rna$CD20pos_NKG2Apos <- "No"
+all_rna$CD20pos_NKG2Apos[all_rna$CD20exp == "CD20pos" & all_rna$NKG2Aexp == "NKG2Apos"] <- "Yes"
+table(all_rna$Type,all_rna$CD20pos_NKG2Apos)
+
+all_rna$CD19pos_NKG2Apos <- "No"
+all_rna$CD19pos_NKG2Apos[all_rna$CD19exp == "CD19pos" & all_rna$NKG2Aexp == "NKG2Apos"] <- "Yes"
+table(all_rna$Type,all_rna$CD19pos_NKG2Apos)
+
+all_rna$Manual <- "NA"
+all_rna$Manual[all_rna$seurat_clusters == "0"] <- "B_manual"
+all_rna$Manual[all_rna$seurat_clusters == "1"] <- "NK_manual"
+all_rna$Manual[all_rna$IgChain == "Yes" & all_rna$CD20pos_NKG2Apos == "Yes"] <- "NKB_manual"
+
+all_rna$Manual2 <- "Other"
+all_rna$Manual2[all_rna$IgChain == "Yes" & all_rna$CD20pos_NKG2Apos == "Yes"] <- "NKB_scRNA-Seq"
+
+
+saveRDS(all_rna,"all_rna_final.rds")
+
+all_rna$Manual_cluster <- paste0(all_rna$Manual,"_",all_rna$seurat_clusters)
+Idents(all_rna) <- "Manual_cluster"
+
+saveRDS(all_rna,"all_rna_sub_filter_cluster_manualann.rds")
+
+```
+
+
+```{r figures}
+
+
+# Panel B
+
+p1 <- DimPlot(all_rna, group.by = "seurat_clusters", pt.size = 1.5, cols = c("#b2182b","#2166ac")) & NoAxes()
+p2 <- DimPlot(all_rna, group.by = "Type", pt.size = 1.5, cols = c("#ef3b2c","#4292c6","#3f007d"), order = c("NKB","NK","B")) & NoAxes()
+
+p1+p2
+
+
+# Panel C
+
+DefaultAssay(all_rna) <- "RNA"
+
+Idents(all_rna) <- "seurat_clusters"
+markers_cluster <- FindAllMarkers(all_rna,test.use = "MAST", only.pos = T)
+markers_cluster <- markers_cluster[markers_cluster$p_val_adj < 0.05,]
+
+markers_cluster %>%
+  group_by(cluster) %>%
+  arrange(desc(avg_log2FC), .by_group = T) %>%
+  top_n(n = 10, wt = avg_log2FC) -> top10
+
+markers2 <- markers_cluster[markers_cluster$pct.1 >= 0.8 | markers_cluster$pct.2 >= 0.8,]
+
+
+
+markers2 %>% 
+  group_by(cluster) %>%
+  arrange(desc(avg_log2FC),.by_group = T) %>%
+  top_n(n = 20,wt=avg_log2FC) -> top
+
+p_heat <- DoHeatmap(all_rna, features = top$gene)
+
+p_heat
+
+# Panel D
+new <- read.table("nk_markers.txt", header = T, sep ="\t") # FCGR3A => FCGR3B; KLRC2 missing
+Idents(all_rna) <- "Type_Cluster2"
+p3 <- DotPlot(all_rna, features= new$Marker, dot.scale = 4) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + coord_flip() 
+
+p3
+
+
+# Panel E
+
+table(all_rna$Type_Cluster2,all_rna$AnimalID)
+all_rna$AnimalID_Type <- paste0(all_rna$AnimalID,"_",all_rna$Type_Cluster2)
+
+table(all_rna$AnimalID_Type)
+totals <- as.numeric(table(all_rna$AnimalID_Type))
+
+table(all_rna$AnimalID_Type, all_rna$IgChain)
+
+d <- melt(table(all_rna$AnimalID_Type, all_rna$IgChain)/totals * 100)
+names(d) <- c("AnimalID_Type","IgChain","Proportion")
+
+d$AnimalID <- d$AnimalID_Type
+d$AnimalID <- gsub ("_B|_NK.*","",d$AnimalID)
+
+d$Type <- d$AnimalID_Type
+d$Type <- gsub ("231-09_|237-09_|94-09_","",d$Type)
+
+head(d)
+
+d <- d[d$IgChain == "Yes",]
+d
+
+p4 <- ggplot(d, aes(x=Type,y=Proportion, fill = AnimalID)) +
+  geom_point(shape=21,aes(fill=AnimalID), size = 5) +
+  scale_fill_manual(values=c("#f1a340","#f7f7f7","#998ec3")) +
+  theme_bw() +
+  ylab("Percentage of cells with\nIg Heavy/Light chain") + 
+  ylim(c(0,100)) +
+  stat_summary(aes(group = Type), fun= mean, fun.min = mean, fun.max = mean,
+               geom = "crossbar", width = 0.5, color = "black", size = 0.5) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(text = element_text(size=14),
+        axis.text.x = element_text(color = "black", size = 12, angle = 45, hjust = 1),
+        axis.text.y = element_text(size=12, color = "black"))
+
+p4
+
+# Panel F
+
+
+p5 <- DimPlot(all_rna, split.by = "Type", group.by = "IgChain", cols = c("#d9d9d9","#006d2c"), order = c("Yes","No")) & NoAxes()
+
+p5
+
+# Panel G
+
+
+unique(all_rna$C.subject.id.x)
+all_rna$C.subject.id.x[is.na(all_rna$C.subject.id.x)] <- "-"
+all_rna$C.subject.id.x <- factor(all_rna$C.subject.id.x, levels = rev(c("IGHM_01","IGHD_01","IGHG3_01","-")))
+
+table(all_rna$Type_Cluster2, all_rna$C.subject.id.x)
+totals <- as.numeric(table(all_rna$Type_Cluster2))
+totals
+
+table(all_rna$Type_Cluster2, all_rna$C.subject.id.x)/totals * 100
+
+d <- melt(table(all_rna$Type_Cluster2, all_rna$C.subject.id.x)/totals * 100)
+names(d) <- c("Type","Isotype","Proportion")
+
+p6 <- ggplot(d, aes(x=Type,y=Proportion, fill = Isotype)) +
+  geom_bar(aes(fill=Isotype),position="stack", stat="identity") +
+  scale_fill_manual(values=rev(c("#1b9e77","#d95f02","#e7298a","#cccccc"))) +
+  theme_bw() +
+  ylab("Percentage of cell type\nwith a given isotype") + 
+  ylim(c(0,100)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(text = element_text(size=14),
+        axis.text.x = element_text(color = "black", size = 12, angle = 45, hjust = 1),
+        axis.text.y = element_text(size=12, color = "black"))
+
+p6
+
+# Panel H
+
+all_rna$Mutations_KimDB <- 100-all_rna$v_identity
+d <- all_rna@meta.data[,c("Type_Cluster2","Mutations_KimDB")]
+
+d <- d[!is.na(d$Mutations_KimDB),]
+
+head(d)
+p7 <- ggplot(d,aes(x=Type_Cluster2,y=Mutations_KimDB)) +
+  geom_violin(width = 0.5,aes(fill= Type_Cluster2)) +
+  geom_jitter(width = 0.25, size = 1) +
+  scale_fill_manual(values=c("#ef3b2c","#3f007d","#3f007d")) +
+  theme_bw() +
+  ylab("Percentage mutation in\n Heavy chain") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(text = element_text(size=14),
+        axis.text.x = element_text(color = "black", size = 12,angle = 45, hjust = 1),
+        axis.text.y = element_text(size=12, color = "black")) + theme(legend.position = "none")
+
+p7 
+
+# Panel I
+
+all_rna$Type_Cluster2 <- factor(all_rna$Type_Cluster2,levels = c("B","NK","NKB_0","NKB_1"))
+Idents(all_rna) <- "Type_Cluster2"
+p8 <- VlnPlot(all_rna,features = c("CD19","MS4A1","KLRC1","NFIL3"),ncol = 2, cols = c("#ef3b2c","#4292c6","#3f007d","#3f007d"))
+p8
+
+
+
+# Panel J
+
+p9 <- (DimPlot(all_rna_nkb,group.by = "CD19exp", pt.size = 1, cols = c("#de2d26","#d9d9d9"),order=c("CD19pos","CD19neg")) + ggtitle("CD19 > 2")) +
+  (DimPlot(all_rna,group.by = "NKG2Aexp", pt.size = 1, cols = c("#d9d9d9","#31a354"),order=c("NKG2Apos","NKG2Aneg")) + ggtitle("KLRC1 > 2")) +
+  (DimPlot(all_rna_nkb,group.by = "CD19pos_NKG2Apos", pt.size = 1, cols = c("#d9d9d9","#feb24c"),order=c("Yes","No")) + ggtitle("CD19 > 2 & KLRC1 > 2")) & NoAxes() & NoLegend()
+
+p10 <- (DimPlot(all_rna_nkb,group.by = "CD20exp", pt.size = 1, cols = c("#de2d26","#d9d9d9"),order=c("CD20pos","CD20neg")) + ggtitle("MS4A1 > 2")) +
+  (DimPlot(all_rna,group.by = "NKG2Aexp", pt.size = 1, cols = c("#d9d9d9","#31a354"),order=c("NKG2Apos","NKG2Aneg")) + ggtitle("KLRC1 > 2")) +
+  (DimPlot(all_rna_nkb,group.by = "CD20pos_NKG2Apos", pt.size = 1, cols = c("#d9d9d9","#feb24c"),order=c("Yes","No")) + ggtitle("MS4A1 > 2 & KLRC1 > 2")) & NoAxes() & NoLegend()
+
+p9/p10 
+
+
+# Panel K
+
+table(all_rna_nkb$Manual2)
+Idents(all_rna_nkb) <- "Manual2"
+p12 <- DimPlot(all_rna_nkb, pt.size = 3, cols = c("#d9d9d9","#3f007d"), order = c("NKB_scRNA-Seq","Other")) & NoAxes()
+
+p12
+
+
+
+
+
+
+```
